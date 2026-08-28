@@ -95,23 +95,34 @@ const DEFAULT_ROLES = [
     name: "Club Admin",
     slug: "club_admin",
     authorityLevel: 1,
-    description: "Club-level admin. Manages managers, views revenue, oversees tournaments.",
+    description: "Club-level admin. Core tournament management; everything else comes from a plan.",
     color: "#7C3AED",
     icon: "building",
     isSystem: true,
+    // ══════════════════════════════════════════════════════════════════
+    // ⚠️  TRIMMED TO THE FREE TIER (Phase 3 of the pricing module).
+    //
+    // This role used to seed with 31 permissions. 22 of them are now SOLD via
+    // Plans and live on a Subscription instead — see PRICING_MODULE_PLAN.md §4.
+    // A plan only ever ADDS to this list, so these 9 are the floor every club
+    // keeps forever, subscription or not.
+    //
+    // ⚠️  RUNNING THIS SEED ON AN EXISTING DEPLOYMENT REWRITES THE LIVE ROLE
+    //     AND STRIPS THOSE 22 PERMISSIONS FROM EVERY CLUB AT ONCE.
+    //
+    //     On an existing database, run the migration instead — it makes the
+    //     same change but decides what happens to current customers first:
+    //         node scripts/migrateBillingBaseline.js --mode=grandfather --apply
+    //
+    //     A fresh install has no clubs to protect, so seeding this directly is
+    //     correct there.
+    // ══════════════════════════════════════════════════════════════════
     permissionKeys: [
       "tournament:read", "tournament:create", "tournament:update", "tournament:delete",
-      "tournament:manage", "tournament:score", "tournament:export", "tournament:bulk_register",
-      "turf:read", "turf:create", "turf:update", "turf:delete",
-      "booking:read", "booking:approve",
-      "player:read", "player:view_all",
-      "manager:create", "manager:read", "manager:delete",
-      "news:create", "news:update", "news:publish",
-      "payment:read", "payment:approve",
-      "expense:create", "expense:read",
-      "referee:assign", "referee:read",
-      "social:create", "social:delete",
-      "report:view_all",
+      "tournament:manage", "tournament:score",
+      "booking:read",
+      "player:read",
+      "manager:read",
     ],
   },
   {
@@ -183,6 +194,36 @@ const DEFAULT_ROLES = [
       "tournament:register",
       "referee:read",
       "player:read",
+    ],
+  },
+  {
+    name: "Vendor",
+    slug: "vendor",
+    authorityLevel: 4,
+    description:
+      "Equipment seller. Runs a storefront; also participates in tournaments like any other person.",
+    color: "#0891B2",
+    icon: "store",
+    isSystem: true,
+    // ── Why these keys, and not store-specific ones ──
+    //
+    // Every vendor route is still gated by the LEGACY requireRole("vendor")
+    // (routes/vendorAccountRoutes.js, routes/vendorStoreRoutes.js), not by
+    // requirePermission — so store-specific permission keys would be invented
+    // for nothing today. They get added when those routes move onto RBAC.
+    //
+    // What this list MUST do is preserve behaviour. Until now `vendor` was
+    // absent from mapLegacyRole and fell through to "player", so a vendor was
+    // silently evaluated against the player role. Mirroring the player
+    // participant baseline exactly means fixing the identity bug changes no
+    // vendor's access. Same reasoning as Referee above: a vendor is also a
+    // person who plays.
+    permissionKeys: [
+      "tournament:read", "tournament:register",
+      "turf:read",
+      "booking:create", "booking:read", "booking:delete",
+      "player:update",
+      "social:create",
     ],
   },
 ];

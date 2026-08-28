@@ -3,6 +3,7 @@ const User = require("../src/modules/identity/models/User");
 const { Manager } = require("../src/modules/identity/models/ClubManager");
 const Superadminmodel = require("../src/modules/identity/models/Superadminmodel");
 const Role = require("../src/modules/identity/models/Role");
+const { grantedPermissionsForRequest } = require("../utils/entitlements");
 
 // ═══════════════════════════════════════════════════════════════
 // UNIFIED AUTH — Resolves token → user/manager/superadmin + role
@@ -128,6 +129,31 @@ const DENY = {
   message: "Access denied. You don't have permission to perform this action.",
 };
 
+/**
+ * Every permission key the caller effectively holds:
+ *
+ *     role.permissions  ∪  activeSubscription.grantedPermissions
+ *
+ * The base role is the FLOOR — a plan only ever ADDS. A lapsed subscription
+ * therefore drops a customer back to their role, never below it.
+ *
+ * Shared by requirePermission and requireAnyPermission so the two gates cannot
+ * drift apart; a paid feature must unlock identically through either.
+ */
+async function effectivePermissionKeys(role) {
+  const keys = new Set(
+    (role.permissions || [])
+      .filter((p) => p && p.isActive !== false)
+      .map((p) => (typeof p === "string" ? p : p.key))
+  );
+
+  // Purchased entitlements, scoped to whoever is making this request. Resolves
+  // to [] for players/public, and for anyone without a live subscription.
+  for (const key of await grantedPermissionsForRequest()) keys.add(key);
+
+  return keys;
+}
+
 // Re-check the caller's status doc — defends against an existing valid JWT
 // from a freshly-suspended account that the upstream legacy middleware didn't
 // gate (e.g. routes that mounted rbac directly without authenticate first).
@@ -223,11 +249,7 @@ const requirePermission = (...permissionKeys) => {
       return deny("role has no permissions array (populate failed?)", { slug: role.slug });
     }
 
-    const grantedKeys = new Set(
-      role.permissions
-        .filter((p) => p && p.isActive !== false)
-        .map((p) => (typeof p === "string" ? p : p.key))
-    );
+    const grantedKeys = await effectivePermissionKeys(role);
 
     const missing = permissionKeys.filter((k) => !grantedKeys.has(k));
     if (missing.length > 0) {
@@ -257,11 +279,7 @@ const requireAnyPermission = (...permissionKeys) => {
       return res.status(403).json(DENY);
     }
 
-    const grantedKeys = new Set(
-      role.permissions
-        .filter((p) => p && p.isActive !== false)
-        .map((p) => (typeof p === "string" ? p : p.key))
-    );
+    const grantedKeys = await effectivePermissionKeys(role);
 
     const hasAny = permissionKeys.some((k) => grantedKeys.has(k));
     if (!hasAny) {
@@ -341,6 +359,11 @@ function mapLegacyRole(legacyRole) {
     team: "team",
     Referee: "referee",
     referee: "referee",
+    // A vendor sells equipment through the store. Before this line the slug
+    // fell through to the map's default and every vendor was evaluated against
+    // the PLAYER role's permissions — a latent bug independent of billing.
+    Vendor: "vendor",
+    vendor: "vendor",
     // ── Event OS (IONIX Sports Events) ──
     AgencyAdmin: "agency_admin",
     agency_admin: "agency_admin",
@@ -371,4 +394,7 @@ module.exports = {
   requireAnyPermission,
   requireAuthority,
   requireRole,
+  // Exported so the role-mapping contract can be asserted directly, without
+  // standing up a request. See tests/integration/vendorTenancy.test.js.
+  mapLegacyRole,
 };

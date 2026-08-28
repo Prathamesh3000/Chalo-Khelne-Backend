@@ -140,6 +140,10 @@ router.post("/register", registerLimiter, async (req, res) => {
     if (role === "ClubAdmin") {
       user.clubId = user._id;
       await user.save();
+
+      // 7-day trial. Non-fatal — a billing hiccup must not block registration.
+      const { grantTrialSafe } = require("../services/subscriptionService");
+      await grantTrialSafe({ subjectId: user._id, subjectType: "club" });
     }
 
     // Fire-and-forget welcome email — failures don't block registration.

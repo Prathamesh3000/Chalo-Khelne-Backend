@@ -293,6 +293,11 @@ exports.onboardClubAdmin = async (req, res) => {
     });
     await newUser.save();
 
+    // 7-day trial. Non-fatal: a billing hiccup must not block onboarding.
+    // NOTE: the clock starts NOW, at provisioning — see PRICING_MODULE_PLAN §8 D6.
+    const { grantTrialSafe } = require("../services/subscriptionService");
+    await grantTrialSafe({ subjectId: newUser._id, subjectType: "club" });
+
     const generatedClubID = `CLUB-${Math.floor(100000 + Math.random() * 900000)}`;
 
     const newProfile = new ClubAdmin({

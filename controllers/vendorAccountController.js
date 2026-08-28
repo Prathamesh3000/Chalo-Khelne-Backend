@@ -96,6 +96,12 @@ async function createVendorUser(profile) {
   });
   await user.save();
   profile.userId = user._id;
+
+  // 7-day trial on the vendor plan. Non-fatal — a billing hiccup must not
+  // block account creation.
+  const { grantTrialSafe } = require("../services/subscriptionService");
+  await grantTrialSafe({ subjectId: user._id, subjectType: "vendor" });
+
   return user;
 }
 

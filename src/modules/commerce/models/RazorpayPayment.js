@@ -10,7 +10,10 @@ const mongoose = require("mongoose");
 const razorpayPaymentSchema = new mongoose.Schema(
   {
     userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
-    purpose: { type: String, enum: ["tournament", "turf", "store", "custom"], required: true },
+    // "subscription": refId is the Plan id, and `notes` carries the billing
+// subject recorded at ORDER time — the webhook fires server-to-server with no
+// auth context, so the subject cannot be resolved at activation.
+    purpose: { type: String, enum: ["tournament", "turf", "store", "custom", "subscription"], required: true },
     refId: { type: mongoose.Schema.Types.ObjectId, default: null, index: true }, // booking / turfBooking / order id
     amountPaise: { type: Number, required: true, min: 100 },
     currency: { type: String, default: "INR" },

@@ -24,6 +24,27 @@ async function applyPaymentToPurpose(payment) {
     } else if (payment.purpose === "turf") {
       const TurfBooking = require("../src/modules/org/models/TurfBooking");
       await TurfBooking.findByIdAndUpdate(payment.refId, { paymentStatus: "paid", status: "confirmed" });
+    } else if (payment.purpose === "subscription") {
+      // refId is the Plan id; `notes` carries the billing subject recorded at
+      // ORDER time. The webhook path has no auth context, so the subject
+      // cannot be resolved here — it must already be on the record.
+      const { activateFromPayment } = require("../services/subscriptionService");
+      const notes = payment.notes || {};
+      if (!notes.subjectId) {
+        console.error(
+          `[RZP_APPLY] subscription payment ${payment._id} has no subjectId in notes — ` +
+            `cannot activate. The order was created without recording the subject.`
+        );
+        return;
+      }
+      await activateFromPayment({
+        subjectId: notes.subjectId,
+        subjectType: notes.subjectType || "club",
+        planId: payment.refId,
+        razorpayOrderId: payment.razorpayOrderId,
+        razorpayPaymentId: payment.razorpayPaymentId,
+        pricePaidRupees: Math.round(payment.amountPaise / 100),
+      });
     } else if (payment.purpose === "store") {
       // Store order model name may vary; guard so a missing model can't break verify.
       try {

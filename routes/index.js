@@ -51,6 +51,8 @@ const ROUTES = [
   ["/api/expenses",                 "./expenseRoutes"],
   ["/api/club-admin/finance",       "./clubAdminFinanceRoutes"],
   ["/api/roles",                    "./rbacRoutes"],
+  ["/api/billing",                  "./billingRoutes"],
+  ["/api/plans",                    "./planRoutes"],
   ["/api/equipment",                "./vendorRoutes"],
   ["/api/vendors",                  "./vendorAccountRoutes"],
   ["/api/vendor-store",             "./vendorStoreRoutes"],
