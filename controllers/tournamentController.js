@@ -508,6 +508,29 @@ const GROUP_STAGE_FORMATS = ["Singles", "Doubles", "Teams"];
 const KNOCKOUT_FORMATS = ["Singles", "Doubles", "Teams", "Teams Knockout", "Davis Cup"];
 const DRAW_SIZES = [16, 32, 64];
 
+// "YYYY-MM-DD" (or an ISO string starting with one) → "YYYY-MM-DD"; else null.
+const toDayOrNull = (v) => {
+  const m = typeof v === "string" ? v.match(/^(\d{4}-\d{2}-\d{2})/) : null;
+  return m && !Number.isNaN(Date.parse(m[1])) ? m[1] : null;
+};
+
+// A category's day must fall inside the tournament's start–end range.
+// Returns an error message, or null when every dated category fits.
+const findCategoryDateOutOfRange = (sports, startDate, endDate) => {
+  const start = toDayOrNull(startDate);
+  const end = toDayOrNull(endDate);
+  for (const s of sports || []) {
+    for (const c of s.categories || []) {
+      const day = toDayOrNull(c.date);
+      if (!day) continue;
+      if ((start && day < start) || (end && day > end)) {
+        return `Category "${c.name}" (${s.sportName}) is dated ${day}, outside the tournament dates ${start || "?"} to ${end || "?"}.`;
+      }
+    }
+  }
+  return null;
+};
+
 const normalizeCategoryRow = (c) => {
   const toIntOrNull = (v) => {
     if (v === null || v === undefined || v === "") return null;
@@ -529,6 +552,7 @@ const normalizeCategoryRow = (c) => {
     minAge: toIntOrNull(c.minAge),
     maxAge: toIntOrNull(c.maxAge),
     gender: ["male", "female", "any"].includes(g) ? g : "any",
+    date: toDayOrNull(c.date),
 
     // Per-category overrides — null everywhere means the track applies, which
     // is exactly how every tournament created before this behaved.
@@ -609,6 +633,11 @@ exports.createTournament = async (req, res) => {
     } catch (err) {
       if (handleSportContextError(err, res)) return;
       throw err;
+    }
+
+    const categoryDateError = findCategoryDateOutOfRange(parsedSports, startDate, endDate);
+    if (categoryDateError) {
+      return res.status(400).json({ message: categoryDateError });
     }
 
     // STEP 17c — root sportsType is no longer accepted from the
@@ -1318,7 +1347,14 @@ exports.editTournament = async (req, res) => {
     tournament.eventLocation = req.body.eventLocation || tournament.eventLocation;
     tournament.managerId = managerIds;
     tournament.termsAndConditions = termsAndConditions;
-    if (req.body.registrationDeadline) tournament.registrationDeadline = new Date(req.body.registrationDeadline);
+    // Present-but-empty clears the deadline; absent leaves it untouched.
+    if (req.body.registrationDeadline !== undefined) {
+      const d = req.body.registrationDeadline ? new Date(req.body.registrationDeadline) : null;
+      if (d && Number.isNaN(d.getTime())) {
+        return res.status(400).json({ message: "Invalid registration deadline" });
+      }
+      tournament.registrationDeadline = d;
+    }
 
     // Privacy + clientId. multipart/form-data sends booleans as strings —
     // accept both "true"/"false" and real booleans. When toggling to private,
@@ -1368,6 +1404,12 @@ exports.editTournament = async (req, res) => {
       } catch (err) {
         if (handleSportContextError(err, res)) return;
         throw err;
+      }
+
+      // tournament.startDate/endDate already hold this request's values (set above).
+      const categoryDateError = findCategoryDateOutOfRange(parsedSportsForEdit, tournament.startDate, tournament.endDate);
+      if (categoryDateError) {
+        return res.status(400).json({ message: categoryDateError });
       }
     }
 

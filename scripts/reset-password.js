@@ -1,4 +1,7 @@
 require("dotenv").config({ path: require("path").join(__dirname, "..", ".env") });
+// Without this, SRV lookup fails with `querySrv ECONNREFUSED` on machines where
+// Node's resolver falls back to 127.0.0.1 — the server has the same guard.
+require("../utils/dnsGuard");
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 

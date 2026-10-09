@@ -15,32 +15,9 @@ const { patchConsole } = require("./utils/logger");
 patchConsole();
 
 // ── DNS resolver guard (must run before the Mongo connect) ────────────
-//
-// A `mongodb+srv://` URI needs an SRV record lookup, and SRV goes through
-// Node's bundled c-ares resolver — NOT the OS resolver that plain hostname
-// lookups (dns.lookup) use. When c-ares cannot read the system DNS
-// configuration, it falls back to a hard-coded 127.0.0.1. Nothing is listening
-// on port 53 there, so every SRV query is refused and the driver dies with:
-//
-//   FATAL: MongoDB connection failed: querySrv ECONNREFUSED _mongodb._tcp...
-//
-// which reads like a database or credentials fault and is neither — Windows
-// itself resolves the very same name correctly.
-//
-// The `['127.0.0.1']` list is c-ares' give-up sentinel, so treating it as the
-// trigger is precise: a machine with real resolvers configured never matches,
-// and this is inert in production. DNS_SERVERS overrides the fallback list.
-const dns = require("dns");
-const resolvers = dns.getServers();
-if (resolvers.length === 1 && (resolvers[0] === "127.0.0.1" || resolvers[0] === "::1")) {
-  const fallback = (process.env.DNS_SERVERS || "8.8.8.8,1.1.1.1")
-    .split(",").map((s) => s.trim()).filter(Boolean);
-  dns.setServers(fallback);
-  console.warn(
-    `[dns] Resolver was ${resolvers[0]} with nothing listening — SRV lookups ` +
-    `would fail. Falling back to ${fallback.join(", ")}. Set DNS_SERVERS to override.`
-  );
-}
+// Stops `querySrv ECONNREFUSED` on machines where Node's SRV resolver falls
+// back to 127.0.0.1. Shared with the one-off scripts — see utils/dnsGuard.js.
+require("./utils/dnsGuard");
 
 // Optional error tracking (no-op unless SENTRY_DSN set + @sentry/node installed).
 const { initSentry, captureException } = require("./utils/sentry");

@@ -415,3 +415,199 @@ describe("per-category format round-trips through the API", () => {
     expect(cat.drawSize).toBeNull();
   });
 });
+
+// ── Per-category play day ──
+//
+// A multi-day event can schedule categories on different days (e.g. U14 and
+// U12 on 31 Oct, Open on 1 Nov). The day must survive the round-trip and stay
+// inside the tournament's start–end range.
+describe("per-category play day", () => {
+  const datedBody = (categories) => ({
+    title: "Two Day Open",
+    startDate: "2026-10-31",
+    endDate: "2026-11-01",
+    sports: [{ sportName: "Carrom", tournamentLevel: "unranked", categories }],
+  });
+
+  test("persists each category's day; undated categories stay null", async () => {
+    const res = await request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .send(datedBody([
+        { name: "Under 14", fee: 300, date: "2026-10-31" },
+        { name: "Under 12", fee: 300, date: "2026-10-31T00:00:00.000Z" },
+        { name: "Open", fee: 500, date: "2026-11-01" },
+        { name: "Veterans", fee: 500 },
+      ]));
+    expect(res.status).toBeLessThan(400);
+
+    const saved = await Tournament.findOne({ title: "Two Day Open" }).lean();
+    const days = Object.fromEntries(saved.sports[0].categories.map((c) => [c.name, c.date]));
+    expect(days).toEqual({
+      "Under 14": "2026-10-31",
+      "Under 12": "2026-10-31", // ISO input is trimmed to the calendar day
+      Open: "2026-11-01",
+      Veterans: null,
+    });
+  });
+
+  test("rejects a category dated outside the tournament (400)", async () => {
+    const res = await request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .send(datedBody([{ name: "Open", fee: 500, date: "2026-11-02" }]));
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/outside the tournament dates/);
+    expect(await Tournament.countDocuments({ title: "Two Day Open" })).toBe(0);
+  });
+
+  test("an unparseable date is stored as null rather than failing the save", async () => {
+    const res = await request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .send(datedBody([{ name: "Open", fee: 500, date: "next saturday" }]));
+    expect(res.status).toBeLessThan(400);
+    const saved = await Tournament.findOne({ title: "Two Day Open" }).lean();
+    expect(saved.sports[0].categories[0].date).toBeNull();
+  });
+});
+
+// ── Play day through the edit flow ──
+//
+// The edit wizard loads GET /api/tournaments/:id, maps each category (date
+// included) into the form, and PUTs the whole sports[] back. The day has to
+// show up on load and survive / change on save.
+describe("per-category play day on edit", () => {
+  const createDated = async () => {
+    const res = await request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        title: "Editable Two Day Open",
+        startDate: "2026-10-31",
+        endDate: "2026-11-01",
+        sports: [{
+          sportName: "Carrom",
+          tournamentLevel: "unranked",
+          categories: [
+            { name: "Under 14", fee: 300, date: "2026-10-31" },
+            { name: "Open", fee: 500, date: "2026-11-01" },
+          ],
+        }],
+      });
+    expect(res.status).toBeLessThan(400);
+    return (await Tournament.findOne({ title: "Editable Two Day Open" }).lean())._id;
+  };
+
+  // Same shape the wizard sends on save: categories copied from the loaded doc.
+  const editBody = (loaded, categories) => ({
+    title: loaded.title,
+    startDate: loaded.startDate,
+    endDate: loaded.endDate,
+    sports: JSON.stringify([{
+      sportName: "Carrom",
+      tournamentLevel: "unranked",
+      categories,
+    }]),
+  });
+
+  test("the edit form's load endpoint returns each category's day", async () => {
+    const id = await createDated();
+    const res = await request(app)
+      .get(`/api/tournaments/${id}`)
+      .set("Authorization", `Bearer ${token}`);
+    expect(res.status).toBe(200);
+    const days = res.body.tournament.sports[0].categories.map((c) => [c.name, c.date]);
+    expect(days).toEqual([["Under 14", "2026-10-31"], ["Open", "2026-11-01"]]);
+  });
+
+  test("saving the edit form keeps unchanged days and applies a changed one", async () => {
+    const id = await createDated();
+    const loaded = (await request(app).get(`/api/tournaments/${id}`)).body.tournament;
+    const cats = loaded.sports[0].categories.map((c) => ({ name: c.name, fee: c.fee, date: c.date }));
+    cats[0].date = "2026-11-01"; // move U14 to day 2
+
+    const res = await request(app)
+      .put(`/api/tournaments/edit/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send(editBody(loaded, cats));
+    expect(res.status).toBeLessThan(400);
+
+    const saved = await Tournament.findById(id).lean();
+    expect(saved.sports[0].categories.map((c) => [c.name, c.date])).toEqual([
+      ["Under 14", "2026-11-01"],
+      ["Open", "2026-11-01"],
+    ]);
+  });
+
+  test("an edit that moves a category outside the dates is rejected and nothing changes", async () => {
+    const id = await createDated();
+    const loaded = (await request(app).get(`/api/tournaments/${id}`)).body.tournament;
+    const res = await request(app)
+      .put(`/api/tournaments/edit/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send(editBody(loaded, [{ name: "Open", fee: 500, date: "2026-11-05" }]));
+    expect(res.status).toBe(400);
+    expect(res.body.message).toMatch(/outside the tournament dates/);
+
+    const saved = await Tournament.findById(id).lean();
+    expect(saved.sports[0].categories.map((c) => c.date)).toEqual(["2026-10-31", "2026-11-01"]);
+  });
+});
+
+// ── Registration deadline + daily timings ──
+//
+// The wizard sends the deadline as a UTC ISO instant and the daily timings as
+// a JSON string (multipart). Both must persist, come back on the edit load,
+// and the deadline must be clearable on edit.
+describe("registration deadline and timings", () => {
+  const create = () =>
+    request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .field("title", "Deadline Cup")
+      .field("startDate", "2026-10-31")
+      .field("endDate", "2026-11-01")
+      .field("selectedTime", JSON.stringify({ startTime: "08:00", endTime: "19:00" }))
+      .field("registrationDeadline", "2026-10-30T12:30:00.000Z")
+      .field("sports", JSON.stringify([{ sportName: "Carrom", tournamentLevel: "unranked", categories: [{ name: "Open", fee: 0 }] }]));
+
+  const edit = (id, extra = {}) => {
+    const r = request(app)
+      .put(`/api/tournaments/edit/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .field("title", "Deadline Cup")
+      .field("startDate", "2026-10-31")
+      .field("endDate", "2026-11-01")
+      .field("selectedTime", JSON.stringify({ startTime: "09:00", endTime: "20:00" }));
+    for (const [k, v] of Object.entries(extra)) r.field(k, v);
+    return r;
+  };
+
+  test("create persists both, and the edit load returns them", async () => {
+    expect((await create()).status).toBeLessThan(400);
+    const t = await Tournament.findOne({ title: "Deadline Cup" }).lean();
+    const loaded = (await request(app).get(`/api/tournaments/${t._id}`)).body.tournament;
+    expect(loaded.selectedTime).toEqual({ startTime: "08:00", endTime: "19:00" });
+    expect(new Date(loaded.registrationDeadline).toISOString()).toBe("2026-10-30T12:30:00.000Z");
+  });
+
+  test("edit updates timings and keeps the deadline when it is not sent", async () => {
+    await create();
+    const t = await Tournament.findOne({ title: "Deadline Cup" }).lean();
+    expect((await edit(t._id)).status).toBeLessThan(400);
+    const saved = await Tournament.findById(t._id).lean();
+    expect(saved.selectedTime).toEqual({ startTime: "09:00", endTime: "20:00" });
+    expect(saved.registrationDeadline.toISOString()).toBe("2026-10-30T12:30:00.000Z");
+  });
+
+  test("edit changes the deadline, and an empty value clears it", async () => {
+    await create();
+    const t = await Tournament.findOne({ title: "Deadline Cup" }).lean();
+    await edit(t._id, { registrationDeadline: "2026-10-29T18:29:00.000Z" });
+    expect((await Tournament.findById(t._id).lean()).registrationDeadline.toISOString())
+      .toBe("2026-10-29T18:29:00.000Z");
+    await edit(t._id, { registrationDeadline: "" });
+    expect((await Tournament.findById(t._id).lean()).registrationDeadline).toBeNull();
+  });
+});

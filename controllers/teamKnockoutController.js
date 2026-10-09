@@ -4,7 +4,7 @@ const TeamKnockout = require("../src/modules/tournaments/models/TeamKnockout");
 const Booking = require("../src/modules/tournaments/models/BookingModel");
 const Tournament = require("../src/modules/tournaments/models/Tournament");
 const mongoose = require("mongoose");
-const { getFormat, resolveSetPlayers } = require("../Config/teamKnockoutFormats");
+const { getFormat, resolveSetPositions, resolveSetPlayers, needsThirdPlayer } = require("../Config/teamKnockoutFormats");
 const { readMatchResult } = require("../utils/matchUtils");
 const RRLineup = require("../utils/rapidRalliesLineup");
 const {
@@ -182,7 +182,9 @@ const extractPlayerName = (player) => {
   return "Unknown Player";
 };
 
-const getFirstTwoValidPlayers = (sourceData) => {
+// Returns roster slots A/B (with TBD placeholders) and C (null unless a third
+// valid player exists AND the caller's format plays slot C).
+const getValidPlayers = (sourceData, includeC = false) => {
   const invalidNames = [
     "Unknown Player",
     "TBD",
@@ -220,7 +222,7 @@ const getFirstTwoValidPlayers = (sourceData) => {
   return {
     A: playersFound[0] || "Player 1 TBD",
     B: playersFound[1] || "Player 2 TBD",
-    C: null, // Strictly null
+    C: includeC ? playersFound[2] || null : null,
   };
 };
 
@@ -290,6 +292,19 @@ const getGamesRequiredToWin = (match) => {
   return match?.gameRules?.gamesToWin || 1;
 };
 
+// Build a tie's sets from the config formula (A/B/C vs X/Y/Z). Every round
+// and round robin go through here so the manager's chosen formula is honoured.
+const buildSetsFromFormat = (formatConfig, team1, team2) =>
+  isRapidRalliesFormat(formatConfig)
+    ? buildRapidRalliesSets(slotMapFromTeam(team1), slotMapFromTeam(team2))
+    : formatConfig.sets.map((setDef) => resolveSetPlayers(setDef, team1, team2));
+
+// Names of teams that cannot play a 3-player formula (no player in slot C).
+const teamsMissingSlotC = (formatId, teams) =>
+  needsThirdPlayer(formatId)
+    ? teams.filter((t) => !t.playerPositions?.C).map((t) => t.teamName)
+    : [];
+
 const teamKnockoutController = {
   // ================================
   // TOURNAMENT CREATION  
@@ -334,13 +349,16 @@ const teamKnockoutController = {
         maxPointsCap: tf.maxPointsCap || null,
       };
 
+      // 3-player formulas (ABC vs XYZ) need roster slot C filled.
+      const includeC = needsThirdPlayer(_gdcf(tournament, sportId));
+
       // Use cleaned data if available, otherwise fall back to database fetch
       let teamRecords;
 
       if (cleanedTeamData && cleanedTeamData.length > 0) {
         // Create team records from cleaned frontend data
         teamRecords = cleanedTeamData.map((teamData, index) => {
-          const validPlayers = getFirstTwoValidPlayers(teamData.team);
+          const validPlayers = getValidPlayers(teamData.team, includeC);
 
           return {
             tournamentId: new mongoose.Types.ObjectId(tournamentId),
@@ -349,7 +367,7 @@ const teamKnockoutController = {
             playerPositions: {
               A: validPlayers.A,
               B: validPlayers.B,
-              C: null,
+              C: validPlayers.C,
             },
             substitutes: teamData.team.substitutes || [],
             seeding: index + 1,
@@ -377,7 +395,7 @@ const teamKnockoutController = {
 
         // Create team records from bookings
         teamRecords = selectedBookings.map((booking, index) => {
-          const validPlayers = getFirstTwoValidPlayers(booking.team);
+          const validPlayers = getValidPlayers(booking.team, includeC);
           const substitutes = extractSubstitutes(booking.team.substitutes);
 
           return {
@@ -387,7 +405,7 @@ const teamKnockoutController = {
             playerPositions: {
               A: validPlayers.A,
               B: validPlayers.B,
-              C: null,
+              C: validPlayers.C,
             },
             substitutes: substitutes,
             seeding: index + 1,
@@ -419,14 +437,15 @@ const teamKnockoutController = {
         if (existing) {
           // Robust Repair logic
           const hasInvalidA = !existing.playerPositions.A || existing.playerPositions.A === "Unknown Player" || existing.playerPositions.A.includes("TBD");
-          const hasSlotC = existing.playerPositions.C && existing.playerPositions.C !== null;
+          // Slot C must match the formula: filled for 3-player, empty for 2-player.
+          const slotCMismatch = (existing.playerPositions.C || null) !== (record.playerPositions.C || null);
 
-          if (hasInvalidA || hasSlotC) {
-            console.log(`Repairing strictly 2-player data for ${existing.teamName}`);
+          if (hasInvalidA || slotCMismatch) {
+            console.log(`Repairing player slots for ${existing.teamName}`);
             existing.playerPositions = {
               A: record.playerPositions.A,
               B: record.playerPositions.B,
-              C: null
+              C: record.playerPositions.C,
             };
             existing.markModified("playerPositions");
             await existing.save({ session });
@@ -445,6 +464,15 @@ const teamKnockoutController = {
 
       const createdTeams = finalTeams;
       console.log("Total teams ready:", createdTeams.length);
+
+      const missingC = teamsMissingSlotC(_gdcf(tournament, sportId), createdTeams);
+      if (missingC.length > 0) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `This formula needs 3 players per team (A/B/C). Add a third player to: ${missingC.join(", ")}`,
+        });
+      }
 
       // Check if matches already exist
       const existingMatches = await TeamKnockoutMatches.find({
@@ -541,9 +569,7 @@ const teamKnockoutController = {
           }
 
           // Generate sets from config
-          const matchSets = formatConfig.sets.map((setDef) =>
-            resolveSetPlayers(setDef, team1, team2)
-          );
+          const matchSets = buildSetsFromFormat(formatConfig, team1, team2);
 
           matches.push({
             tournamentId: new mongoose.Types.ObjectId(tournamentId),
@@ -706,6 +732,14 @@ const teamKnockoutController = {
         });
       }
 
+      // Load tournament for game rules — resolve the sport-track for multi-sport.
+      const tournament = await Tournament.findById(tournamentId).lean();
+      const { getMatchFormat: _gmf2, getDavisCupFormatId: _gdcf4, resolveSportId: _rsid2 } = require("../utils/sportTrackUtils");
+      const sportId = _rsid2(tournament, req.body.sportId);
+
+      // 3-player formulas (ABC vs XYZ) need roster slot C filled.
+      const includeC = needsThirdPlayer(_gdcf4(tournament, sportId));
+
       // Get all active teams for this tournament
       let teams = await TeamKnockoutTeams.find({
         tournamentId,
@@ -726,7 +760,7 @@ const teamKnockoutController = {
         }
 
         const bootstrapRecords = bookings.map((booking, index) => {
-          const validPlayers = getFirstTwoValidPlayers(booking.team || {});
+          const validPlayers = getValidPlayers(booking.team || {}, includeC);
           const substitutes = extractSubstitutes(booking.team?.substitutes);
           return {
             tournamentId: new mongoose.Types.ObjectId(tournamentId),
@@ -735,7 +769,7 @@ const teamKnockoutController = {
             playerPositions: {
               A: validPlayers.A,
               B: validPlayers.B,
-              C: null,
+              C: validPlayers.C,
             },
             substitutes,
             seeding: index + 1,
@@ -761,10 +795,6 @@ const teamKnockoutController = {
         });
       }
 
-      // Load tournament for game rules — resolve the sport-track for multi-sport.
-      const tournament = await Tournament.findById(tournamentId).lean();
-      const { getMatchFormat: _gmf2, getDavisCupFormatId: _gdcf4, resolveSportId: _rsid2 } = require("../utils/sportTrackUtils");
-      const sportId = _rsid2(tournament, req.body.sportId);
       const tf = _gmf2(tournament, sportId) || {};
       const gameRulesFromTournament = {
         gamesPerSet: tf.totalGames || null,
@@ -830,6 +860,15 @@ const teamKnockoutController = {
         }
       }
 
+      const missingC = teamsMissingSlotC(rrFormatId, teams);
+      if (missingC.length > 0) {
+        await session.abortTransaction();
+        return res.status(400).json({
+          success: false,
+          message: `This formula needs 3 players per team (A/B/C). Add a third player to: ${missingC.join(", ")}`,
+        });
+      }
+
       // Generate all possible matchups (round robin: every team plays every other team)
       const matches = [];
       const baseStartTime = new Date(scheduleDetails.matchStartTime);
@@ -854,6 +893,9 @@ const teamKnockoutController = {
               slotMapFromTeam(team1),
               slotMapFromTeam(team2)
             );
+          } else if (rrFormatConfig) {
+            // Manager's chosen formula (same as knockout rounds).
+            matchSets = buildSetsFromFormat(rrFormatConfig, team1, team2);
           } else {
             matchSets = generateMatchSequence(effectiveFormat).map((seq) => ({
               setNumber: seq.setNumber,
@@ -863,7 +905,7 @@ const teamKnockoutController = {
               homePlayerB: seq.homePosB
                 ? team1.playerPositions[seq.homePosB] || null
                 : null,
-              awayPlayerZ: seq.awayPosZ
+              awayPlayerB: seq.awayPosZ
                 ? team2.playerPositions[seq.awayPosZ] || null
                 : null,
               status: "PENDING",
@@ -1635,11 +1677,6 @@ const teamKnockoutController = {
       // Reconstruct the format string to ensure it's ALWAYS valid (matches enum: "Singles - 3 Sets", etc.)
       const format = `${standardizedPlayFormat} - ${validatedSetCount} Sets`;
 
-      // Resolve formatId for the schema (required field) — per-sport, not root.
-      const nextRoundFormatId = _gdcf5(tournament, sportId) || tournament?.davisCupFormatId || deriveFormatId(standardizedPlayFormat, validatedSetCount, []);
-      let nextRoundFormatName = format;
-      try { nextRoundFormatName = getFormat(nextRoundFormatId).name; } catch {}
-
       console.log(`Setting match format to: "${format}" (derived from playFormat: "${playFormat}", setCount: "${setCount}")`);
 
       // Get completed matches from previous round — ORDERED BY bracketPosition
@@ -1669,6 +1706,17 @@ const teamKnockoutController = {
           message: "Not all previous round matches are completed",
         });
       }
+
+      // Resolve formatId — per-sport config first, then the formula the previous
+      // round was played with, so every round uses the manager's chosen formula.
+      const prevRoundFormatId = (previousRoundMatches.find((m) => !m.isBye) || previousRoundMatches[0])?.formatId;
+      const nextRoundFormatId = _gdcf5(tournament, sportId) || tournament?.davisCupFormatId || prevRoundFormatId || deriveFormatId(standardizedPlayFormat, validatedSetCount, []);
+      let nextRoundFormatName = format;
+      let nextRoundFormatConfig = null;
+      try {
+        nextRoundFormatConfig = getFormat(nextRoundFormatId);
+        nextRoundFormatName = nextRoundFormatConfig.name;
+      } catch {}
 
       // Get winners
       const winners = previousRoundMatches.map((match) => ({
@@ -1716,22 +1764,24 @@ const teamKnockoutController = {
         );
 
         if (team2) {
-          const matchSets = generateMatchSequence(format).map((seq) => ({
-            setNumber: seq.setNumber,
-            type: seq.type,
-            homePlayer: team1.playerPositions[seq.homePos],
-            awayPlayer: team2.playerPositions[seq.awayPos],
-            homePlayerB: seq.homePosB
-              ? team1.playerPositions[seq.homePosB]
-              : null,
-            awayPlayerZ: seq.awayPosZ
-              ? team2.playerPositions[seq.awayPosZ]
-              : null,
-            status: "PENDING",
-            games: [],
-            gamesWon: { home: 0, away: 0 },
-            setWinner: null,
-          }));
+          const matchSets = nextRoundFormatConfig
+            ? buildSetsFromFormat(nextRoundFormatConfig, team1, team2)
+            : generateMatchSequence(format).map((seq) => ({
+              setNumber: seq.setNumber,
+              type: seq.type,
+              homePlayer: team1.playerPositions[seq.homePos],
+              awayPlayer: team2.playerPositions[seq.awayPos],
+              homePlayerB: seq.homePosB
+                ? team1.playerPositions[seq.homePosB]
+                : null,
+              awayPlayerB: seq.awayPosZ
+                ? team2.playerPositions[seq.awayPosZ]
+                : null,
+              status: "PENDING",
+              games: [],
+              gamesWon: { home: 0, away: 0 },
+              setWinner: null,
+            }));
 
           matches.push({
             tournamentId: new mongoose.Types.ObjectId(tournamentId),
@@ -1899,24 +1949,44 @@ const teamKnockoutController = {
       console.log(`Updating ${affectedMatches.length} matches due to player swap`);
 
       for (const match of affectedMatches) {
-        const sequence = generateMatchSequence(match.format);
+        let formatConfig = null;
+        try { formatConfig = getFormat(match.formatId); } catch {}
+        // Rapid Rallies ties use P1..P5 roster slots, not A/B — nothing to remap.
+        if (isRapidRalliesFormat(formatConfig)) continue;
+
         const isTeam1 = match.team1Id.toString() === teamId;
 
-        match.sets.forEach((set, idx) => {
+        // Slot positions per set: config formula first, legacy sequence as fallback.
+        const positionsFor = (set) => {
+          if (formatConfig) {
+            const setDef = formatConfig.sets.find((s) => s.setNumber === set.setNumber);
+            return setDef ? resolveSetPositions(setDef, set.selectionId) : null;
+          }
+          let sequence;
+          try { sequence = generateMatchSequence(match.format); } catch { return null; }
           const seq = sequence.find((s) => s.setNumber === set.setNumber);
-          if (!seq) return;
+          if (!seq) return null;
+          return {
+            homePos: [seq.homePos, seq.homePosB].filter(Boolean),
+            awayPos: [seq.awayPos, seq.awayPosZ].filter(Boolean),
+          };
+        };
+
+        match.sets.forEach((set) => {
+          const pos = positionsFor(set);
+          if (!pos) return;
 
           if (isTeam1) {
             // Update home players
-            set.homePlayer = team.playerPositions[seq.homePos] || null;
-            if (seq.homePosB) {
-              set.homePlayerB = team.playerPositions[seq.homePosB] || null;
+            set.homePlayer = team.playerPositions[pos.homePos[0]] || null;
+            if (pos.homePos[1]) {
+              set.homePlayerB = team.playerPositions[pos.homePos[1]] || null;
             }
           } else {
             // Update away players
-            set.awayPlayer = team.playerPositions[seq.awayPos] || null;
-            if (seq.awayPosZ) {
-              set.awayPlayerZ = team.playerPositions[seq.awayPosZ] || null;
+            set.awayPlayer = team.playerPositions[pos.awayPos[0]] || null;
+            if (pos.awayPos[1]) {
+              set.awayPlayerB = team.playerPositions[pos.awayPos[1]] || null;
             }
           }
         });
@@ -2016,7 +2086,9 @@ const teamKnockoutController = {
   updateMatchLineup: async (req, res) => {
     try {
       const { matchId } = req.params;
-      const { setNumber, homePlayerB, awayPlayerZ } = req.body;
+      const { setNumber, homePlayerB } = req.body;
+      // Older clients send the away partner as `awayPlayerZ`; the schema field is `awayPlayerB`.
+      const awayPlayerB = req.body.awayPlayerB || req.body.awayPlayerZ;
 
       if (!matchId) {
         return res.status(400).json({
@@ -2044,7 +2116,7 @@ const teamKnockoutController = {
 
       // Update available fields
       if (homePlayerB) set.homePlayerB = homePlayerB;
-      if (awayPlayerZ) set.awayPlayerZ = awayPlayerZ;
+      if (awayPlayerB) set.awayPlayerB = awayPlayerB;
 
       // Mark modified if using Mongoose mixed types or nested objects
       match.markModified('sets');

@@ -80,6 +80,9 @@ const sportTrackSchema = new mongoose.Schema(
       minAge: { type: Number, default: null },
       maxAge: { type: Number, default: null },
       gender: { type: String, enum: ["male", "female", "any"], default: "any" },
+      // Day this category is played ("YYYY-MM-DD", same format as the
+      // tournament's startDate/endDate). Null = runs across the whole event.
+      date:   { type: String, default: null },
 
       // Per-category format overrides. A sport track carries one format for
       // all its categories, which cannot express "Men's Singles is singles,

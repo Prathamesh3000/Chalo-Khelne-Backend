@@ -108,12 +108,22 @@ const TEAM_KNOCKOUT_FORMATS = [
   },
   {
     id: "doubles_3p_bo5_v2", name: "3-Player Mixed — Best of 5 (Classic)", totalSets: 5, setsToWin: 3, hasDoubles: true, minPlayers: 3,
+    // Positions are roster slots A/B/C on BOTH sides (away A/B/C display as X/Y/Z).
     sets: [
-      { setNumber: 1, type: "singles", homePos: ["A"], awayPos: ["X"] },
-      { setNumber: 2, type: "singles", homePos: ["B"], awayPos: ["Y"] },
-      { setNumber: 3, type: "doubles", homePos: ["A", "B"], awayPos: ["X", "Z"] },
-      { setNumber: 4, type: "singles", homePos: ["A"], awayPos: ["Y"] },
-      { setNumber: 5, type: "singles", homePos: ["C"], awayPos: ["Z"] },
+      { setNumber: 1, type: "singles", homePos: ["A"], awayPos: ["A"] },
+      { setNumber: 2, type: "singles", homePos: ["B"], awayPos: ["B"] },
+      {
+        setNumber: 3, type: "doubles", isDecider: false,
+        requiresSelection: true,
+        defaultHomePos: ["A", "B"], defaultAwayPos: ["A", "C"],
+        options: [
+          { id: "ab_xz", homePos: ["A", "B"], awayPos: ["A", "C"] },
+          { id: "bc_yx", homePos: ["B", "C"], awayPos: ["B", "A"] },
+          { id: "ac_xy", homePos: ["A", "C"], awayPos: ["A", "B"] },
+        ],
+      },
+      { setNumber: 4, type: "singles", homePos: ["A"], awayPos: ["B"] },
+      { setNumber: 5, type: "singles", homePos: ["C"], awayPos: ["C"], isDecider: true },
     ],
   },
   {
@@ -282,19 +292,22 @@ function getAllFormatIds() {
  * @param {string|null} selectionId — captain's choice for doubles
  * @returns {{ homePlayer, awayPlayer, homePlayerB, awayPlayerB, type, setNumber }}
  */
-function resolveSetPlayers(setDef, homeTeam, awayTeam, selectionId = null) {
-  let homePos, awayPos;
-
+function resolveSetPositions(setDef, selectionId = null) {
   if (setDef.requiresSelection && selectionId) {
     const option = (setDef.options || []).find((o) => o.id === selectionId);
-    if (option) {
-      homePos = option.homePos;
-      awayPos = option.awayPos;
-    }
+    if (option) return { homePos: option.homePos, awayPos: option.awayPos };
   }
+  return setDef.requiresSelection
+    ? { homePos: setDef.defaultHomePos, awayPos: setDef.defaultAwayPos }
+    : { homePos: setDef.homePos, awayPos: setDef.awayPos };
+}
 
-  if (!homePos) homePos = setDef.requiresSelection ? setDef.defaultHomePos : setDef.homePos;
-  if (!awayPos) awayPos = setDef.requiresSelection ? setDef.defaultAwayPos : setDef.awayPos;
+// Away roster slots A/B/C are shown as X/Y/Z ("Singles A-X", "Doubles AB-XY").
+const AWAY_LABEL = { A: "X", B: "Y", C: "Z" };
+const awayLabel = (positions) => positions.map((p) => AWAY_LABEL[p] || p).join("");
+
+function resolveSetPlayers(setDef, homeTeam, awayTeam, selectionId = null) {
+  const { homePos, awayPos } = resolveSetPositions(setDef, selectionId);
 
   const hp = homeTeam?.playerPositions || {};
   const ap = awayTeam?.playerPositions || {};
@@ -302,8 +315,8 @@ function resolveSetPlayers(setDef, homeTeam, awayTeam, selectionId = null) {
   const result = {
     setNumber: setDef.setNumber,
     type: setDef.type === "doubles"
-      ? `Doubles ${homePos.join("")}-${awayPos.join("")}`
-      : `Singles ${homePos[0]}-${awayPos[0]}`,
+      ? `Doubles ${homePos.join("")}-${awayLabel(awayPos)}`
+      : `Singles ${homePos[0]}-${awayLabel(awayPos.slice(0, 1))}`,
     homePlayer: hp[homePos[0]] || null,
     awayPlayer: ap[awayPos[0]] || null,
     homePlayerB: homePos[1] ? (hp[homePos[1]] || null) : null,
@@ -317,9 +330,30 @@ function resolveSetPlayers(setDef, homeTeam, awayTeam, selectionId = null) {
   return result;
 }
 
+/**
+ * True when the format plays roster slot C (Z on the away side) anywhere.
+ */
+function needsThirdPlayer(formatId) {
+  let f;
+  try {
+    f = getFormat(formatId);
+  } catch {
+    return false;
+  }
+  return f.sets.some((s) =>
+    [
+      ...(s.homePos || []), ...(s.awayPos || []),
+      ...(s.defaultHomePos || []), ...(s.defaultAwayPos || []),
+      ...(s.options || []).flatMap((o) => [...o.homePos, ...o.awayPos]),
+    ].includes("C")
+  );
+}
+
 module.exports = {
   TEAM_KNOCKOUT_FORMATS,
   getFormat,
   getAllFormatIds,
+  resolveSetPositions,
   resolveSetPlayers,
+  needsThirdPlayer,
 };
