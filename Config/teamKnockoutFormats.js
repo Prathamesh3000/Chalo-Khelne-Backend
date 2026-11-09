@@ -78,12 +78,20 @@ const TEAM_KNOCKOUT_FORMATS = [
   },
   {
     id: "singles_3p_bo5", name: "3-Player Singles — Best of 5", totalSets: 5, setsToWin: 3, hasDoubles: false, minPlayers: 3,
+    // ITTF / Swaythling Cup order: A-X, B-Y, C-Z, A-Y, B-X. This is the order
+    // every Indian inter-school table tennis tie is run on (verified against a
+    // GG International School U-11 score sheet, 2026-27).
+    //
+    // Set 5 was previously B v Z, which broke the format's symmetry: the away
+    // side fielded X once and Z twice, while the home side fielded A twice and
+    // C once. Correct is 2-2-1 on BOTH sides. Guarded by
+    // tests/unit/teamTieSwaythlingOrder.test.js.
     sets: [
       { setNumber: 1, type: "singles", homePos: ["A"], awayPos: ["A"] },
       { setNumber: 2, type: "singles", homePos: ["B"], awayPos: ["B"] },
       { setNumber: 3, type: "singles", homePos: ["C"], awayPos: ["C"] },
       { setNumber: 4, type: "singles", homePos: ["A"], awayPos: ["B"] },
-      { setNumber: 5, type: "singles", homePos: ["B"], awayPos: ["C"], isDecider: true },
+      { setNumber: 5, type: "singles", homePos: ["B"], awayPos: ["A"], isDecider: true },
     ],
   },
   // 3-Player Mixed (Doubles with captain selection)

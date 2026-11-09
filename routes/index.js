@@ -67,6 +67,7 @@ const ROUTES = [
   ["/api/planner",                  "./plannerRoutes"],
   ["/api/stories",                  "./storyRoutes"],
   ["/api/follow",                   "./followRoutes"],
+  ["/api/player-history",           "./playerHistoryRoutes"],
 ];
 
 // Families Policy: mount points whose features are age-gated (social graph,

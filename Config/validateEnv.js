@@ -30,6 +30,12 @@ const RECOMMENDED = [
   "EMAIL_USER", // nodemailer sender
   "EMAIL_APP_PASSWORD", // nodemailer auth
   "FRONTEND_URL", // links embedded in outgoing emails
+  // Apple token revocation on account deletion (App Store Guideline 5.1.1(v)).
+  // Without these the deletion still succeeds but the Apple token is NOT
+  // revoked, which Apple also requires. Must be set before the iOS release.
+  "APPLE_TEAM_ID",
+  "APPLE_KEY_ID",
+  "APPLE_PRIVATE_KEY",
 ];
 
 // Patterns that indicate a leftover placeholder / known-weak / compromised value.

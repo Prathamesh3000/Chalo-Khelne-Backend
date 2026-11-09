@@ -17,6 +17,9 @@ const eventsDir = path.join(uploadsDir, "events");
 const turfsDir = path.join(uploadsDir, "turfs");
 const storiesDir = path.join(uploadsDir, "stories");
 const equipmentDir = path.join(uploadsDir, "equipment");
+// Social post photos and player-history (timeline) photos. Public, like stories.
+const postsDir = path.join(uploadsDir, "posts");
+const historyDir = path.join(uploadsDir, "history");
 // Payment-proof screenshots (§2.5). PRIVATE — these are financial evidence
 // showing a player's UPI app, reference and often their name/handle. Served
 // only through the authenticated handler in serveUploads.js.
@@ -36,6 +39,8 @@ if (!fs.existsSync(uploadPath)) fs.mkdirSync(uploadPath, { recursive: true });
   turfsDir,
   storiesDir,
   equipmentDir,
+  postsDir,
+  historyDir,
   paymentProofsDir,
 ].forEach((dir) => {
   if (!fs.existsSync(dir)) {
@@ -131,6 +136,10 @@ const storage = multer.diskStorage({
       cb(null, storiesDir);
     } else if (file.fieldname === "equipmentImages") {
       cb(null, equipmentDir);
+    } else if (file.fieldname === "postImages") {
+      cb(null, postsDir);
+    } else if (file.fieldname === "historyImages") {
+      cb(null, historyDir);
     } else if (file.fieldname === "screenshot") {
       // Payment proof (§2.5) — private directory.
       cb(null, paymentProofsDir);
@@ -154,7 +163,9 @@ const fileFilter = (req, file, cb) => {
     file.fieldname === "turfImages" ||
     file.fieldname === "qrCodes" ||
     file.fieldname === "storyImage" ||
-    file.fieldname === "equipmentImages"
+    file.fieldname === "equipmentImages" ||
+    file.fieldname === "postImages" ||
+    file.fieldname === "historyImages"
   ) {
     if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype)) {
       return cb(new Error("Invalid file type for images"), false);
@@ -213,6 +224,8 @@ module.exports = {
   turfsDir,
   storiesDir,
   equipmentDir,
+  postsDir,
+  historyDir,
   paymentProofsDir,
   cleanupFile: async (filePath) => {
     try {

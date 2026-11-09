@@ -514,6 +514,44 @@ const toDayOrNull = (v) => {
   return m && !Number.isNaN(Date.parse(m[1])) ? m[1] : null;
 };
 
+// "HH:mm" (24-hour) → zero-padded "HH:mm"; anything else → null. Same format
+// as the tournament-wide `selectedTime` window, so the two compare with `<`.
+const toTimeOrNull = (v) => {
+  const m = typeof v === "string" ? v.trim().match(/^(\d{1,2}):(\d{2})$/) : null;
+  if (!m) return null;
+  const h = Number(m[1]);
+  if (h > 23 || Number(m[2]) > 59) return null;
+  return `${String(h).padStart(2, "0")}:${m[2]}`;
+};
+
+// A category can declare several blocks of play on its day. Each one needs a
+// start AND an end, with the end strictly later — a zero- or negative-length
+// block is a typo, not a schedule.
+//
+// Invalid slots are DROPPED rather than failing the save, matching how an
+// unparseable `date` is already handled above: the wizard validates inline, so
+// anything arriving broken here is a stale client or a direct API call, and
+// losing one bad row beats refusing the whole tournament. Slots are sorted and
+// de-duplicated because the "+ Add time slot" button makes both easy to
+// produce by accident.
+const MAX_CATEGORY_TIME_SLOTS = 12;
+const toTimeSlots = (v) => {
+  if (!Array.isArray(v)) return [];
+  const seen = new Set();
+  const slots = [];
+  for (const raw of v) {
+    const startTime = toTimeOrNull(raw?.startTime);
+    const endTime = toTimeOrNull(raw?.endTime);
+    if (!startTime || !endTime || endTime <= startTime) continue;
+    const key = `${startTime}-${endTime}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    slots.push({ startTime, endTime });
+  }
+  slots.sort((a, b) => a.startTime.localeCompare(b.startTime));
+  return slots.slice(0, MAX_CATEGORY_TIME_SLOTS);
+};
+
 // A category's day must fall inside the tournament's start–end range.
 // Returns an error message, or null when every dated category fits.
 const findCategoryDateOutOfRange = (sports, startDate, endDate) => {
@@ -553,6 +591,7 @@ const normalizeCategoryRow = (c) => {
     maxAge: toIntOrNull(c.maxAge),
     gender: ["male", "female", "any"].includes(g) ? g : "any",
     date: toDayOrNull(c.date),
+    timeSlots: toTimeSlots(c.timeSlots),
 
     // Per-category overrides — null everywhere means the track applies, which
     // is exactly how every tournament created before this behaved.

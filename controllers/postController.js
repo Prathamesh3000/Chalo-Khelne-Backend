@@ -3,6 +3,9 @@ const escapeRegex = require('../utils/escapeRegex');
 const Tournament = require('../src/modules/tournaments/models/Tournament'); // Add Tournament model
 const User = require('../src/modules/identity/models/User'); // Add User model
 const { Manager } = require('../src/modules/identity/models/ClubManager'); // Add Manager model
+const playerHistory = require('../services/playerHistoryService');
+const { notifyPlayer } = require('../utils/playerNotify');
+const { getRelativePath, cleanupFile } = require('../middleware/uploads');
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { default: mongoose } = require('mongoose');
@@ -35,9 +38,28 @@ const fetchLinkPreview = async (url) => {
   }
 };
 
+// Multipart bodies deliver lists as one value, a repeated field, or a JSON
+// string; JSON bodies deliver real arrays. Accept all of them.
+const toList = (v) => {
+  if (v === undefined || v === null || v === '') return [];
+  if (Array.isArray(v)) return v;
+  if (typeof v === 'string' && v.trim().startsWith('[')) {
+    try { return JSON.parse(v); } catch (_) { /* fall through */ }
+  }
+  return [v];
+};
+
 exports.createPost = async (req, res) => {
+  const uploaded = req.files || [];
+  const discardUploads = () => uploaded.forEach((f) => cleanupFile(f.path));
   try {
-    const { tournamentName, caption, tags, location, link } = req.body;
+    const { tournamentName, caption, tags, location, link, eventDate } = req.body;
+    const taggedUserIds = toList(req.body.taggedUserIds);
+
+    if (eventDate && Number.isNaN(new Date(eventDate).getTime())) {
+      discardUploads();
+      return res.status(400).json({ message: 'eventDate is not a valid date' });
+    }
 
     // 1. Check if tournament exists in DB - search by title or name (case-insensitive)
     const tournament = await Tournament.findOne({
@@ -49,6 +71,7 @@ exports.createPost = async (req, res) => {
 
     if (!tournament) {
       console.log("Post creation failed: Tournament not found ->", tournamentName);
+      discardUploads();
       return res.status(400).json({
         message: `Tournament "${tournamentName}" not found. Please select from the suggestions.`
       });
@@ -57,7 +80,7 @@ exports.createPost = async (req, res) => {
     // 2. Validate tags if provided (optional validation)
     let tagList = [];
     if (tags) {
-      tagList = Array.isArray(tags) ? tags : [tags];
+      tagList = toList(tags);
       // We'll keep the tags as strings even if users aren't found in DB, 
       // but let's log any that aren't found if we want to be helpful.
     }
@@ -69,10 +92,17 @@ exports.createPost = async (req, res) => {
     }
 
     // 4. Create post
+    const authorIsPlayer = req.userRole === 'User';
+    const authorId = req.user.id;
+    const taggedUsers = await playerHistory.resolveTaggedUsers(taggedUserIds, authorId);
+
     const post = new Post({
       tournamentName: tournament.title || tournament.name || tournamentName,
       caption,
       tags: tagList,
+      taggedUsers,
+      eventDate: eventDate ? new Date(eventDate) : undefined,
+      images: uploaded.map((f) => getRelativePath(f.path)),
       location,
       link,
       linkPreview,
@@ -84,10 +114,46 @@ exports.createPost = async (req, res) => {
     });
 
     await post.save();
+
+    // 5. Timeline: the author's own entry is ACTIVE, every tagged player gets a
+    // PENDING one they must approve. The post is already saved and is the
+    // primary result, so a history failure is logged rather than failing the
+    // request — the entries can be re-derived from the post.
+    try {
+      const entries = await playerHistory.recordFromPost({
+        post,
+        tournament,
+        authorId,
+        authorIsPlayer,
+        taggedUserIds: taggedUsers,
+      });
+
+      // Tell each tagged player there is something to approve. notifyPlayer
+      // saves it, emits over the socket and sends the Expo push, and never
+      // throws — a notification problem must not affect the post.
+      const authorName = req.user.name || 'Someone';
+      for (const entry of entries.filter((e) => e && e.status === 'pending')) {
+        await notifyPlayer(req.app, entry.user, {
+          type: 'history_tag',
+          title: 'You were tagged in a post',
+          message: `${authorName} tagged you in a post about ${post.tournamentName}. Review it to add it to your playing history.`,
+          data: {
+            historyId: String(entry._id),
+            postId: String(post._id),
+            tournamentName: post.tournamentName,
+            senderName: authorName,
+          },
+        });
+      }
+    } catch (historyErr) {
+      console.error("Player history record failed for post", String(post._id), historyErr);
+    }
+
     res.status(201).json(post);
 
   } catch (error) {
     console.error("Create post error:", error);
+    discardUploads();
     res.status(400).json({ message: error.message });
   }
 };
@@ -319,6 +385,9 @@ exports.deletePost = async (req, res) => {
       return res.status(403).json({ message: "Unauthorized to delete this post" });
     }
 
+    // Deliberately NOT touching PlayerHistory (or its copied image paths): the
+    // match stays on the author's and tagged players' timelines after the post
+    // is gone. The unlink from the post is harmless — history never requires it.
     await Post.findByIdAndDelete(postId);
     res.json({ success: true, message: "Post deleted successfully" });
   } catch (error) {

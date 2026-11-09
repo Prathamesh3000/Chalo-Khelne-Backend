@@ -103,10 +103,18 @@ exports.authenticate = async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET, { algorithms: ["HS256"] });
     const user = await User.findById(decoded.id).select(
-      "_id role status suspensionReason"
+      "_id role status suspensionReason isDeleted"
     );
 
     if (user) {
+      // Guideline 5.1.1(v) — a user-deleted account survives as an anonymized
+      // tombstone so other collections keep their references (see
+      // services/accountDeletionService.js). It must never authenticate: the
+      // access token issued before deletion stays cryptographically valid for
+      // up to an hour, and this is what kills it immediately.
+      if (user.isDeleted) {
+        return res.status(401).json({ message: "Account deleted." });
+      }
       if (rejectIfSuspended(user, res)) return;
 
       // §3.1 — the ROLE comes from the database record, not the token.
@@ -183,6 +191,10 @@ exports.allowUserOrManager = async (req, res, next) => {
 
     let user = await User.findById(id);
     if (user) {
+      // Deleted-account tombstone — see authenticate() above.
+      if (user.isDeleted) {
+        return res.status(401).json({ message: "Account deleted." });
+      }
       if (rejectIfSuspended(user, res)) return;
       req.user = user;
       req.userRole = "User";

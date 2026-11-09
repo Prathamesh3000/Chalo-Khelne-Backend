@@ -40,6 +40,12 @@ const { signAccessToken, signAccessTokenFor, issueRefreshToken, rotateRefreshTok
 // Limiters moved to middleware/rateLimiters.js so the OTP and password-reset
 // routes use the same definitions instead of going unlimited (§3.2).
 const { authLimiter, registerLimiter } = require("../middleware/rateLimiters");
+// Sign in with Apple (Guideline 4.8) + account deletion (Guideline 5.1.1(v)).
+const {
+  verifyAppleIdentityToken,
+  exchangeAppleAuthorizationCode,
+} = require("../utils/appleAuth");
+const { deleteUserAccount } = require("../services/accountDeletionService");
 
 // Register a new user
 router.post("/register", registerLimiter, async (req, res) => {
@@ -351,6 +357,12 @@ router.post("/login", authLimiter, async (req, res) => {
 
     // ✅ User/Admin Login
     if (user) {
+      // A user-deleted account is an anonymized tombstone whose email was
+      // rewritten, so this lookup should already have missed. Checked anyway:
+      // deletion is irreversible and must not depend on one field's value.
+      if (user.isDeleted) {
+        return res.status(404).json({ message: "User not found" });
+      }
       if (!user.isApproved) {
         return res.status(403).json({ message: "User not approved yet" });
       }
@@ -666,6 +678,280 @@ router.post("/google-login", authLimiter, async (req, res) => {
     res.status(401).json({
       message: "Authentication failed. Please try again.",
     });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Sign in with Apple — POST /api/apple-login  (alias: /api/auth/apple-login)
+//
+// App Store Guideline 4.8: an app offering a third-party login (Google, above)
+// MUST also offer Sign in with Apple. Deliberately mirrors /google-login —
+// same authLimiter, same find-or-create shape, and byte-for-byte the SAME
+// RESPONSE BODY, so the mobile client reuses its googleLogin handling.
+//
+// Body: { identityToken, fullName, email, platform, authorizationCode? }
+//   identityToken ....... the JWT from expo-apple-authentication (REQUIRED)
+//   fullName / email .... Apple sends these ONLY on the first authorization;
+//                         used as a fallback for display, never as identity
+//   authorizationCode ... optional; exchanged for an Apple refresh token so
+//                         account deletion can revoke it (Guideline 5.1.1(v))
+//
+// `email` from the body is NEVER trusted. Identity comes from the
+// cryptographically verified `sub` and `email` claims only — a client that
+// posts someone else's email gets that email ignored, not honoured.
+// ════════════════════════════════════════════════════════════════════════════
+router.post(["/apple-login", "/auth/apple-login"], authLimiter, async (req, res) => {
+  const { identityToken, fullName, platform, authorizationCode } = req.body || {};
+
+  try {
+    if (!identityToken) {
+      return res.status(400).json({ message: "identityToken is required" });
+    }
+
+    // ── Cryptographic verification (RS256 against Apple's JWKS, iss/aud/exp) ──
+    let claims;
+    try {
+      claims = await verifyAppleIdentityToken(identityToken);
+    } catch (verifyError) {
+      console.warn("[APPLE] identityToken verify failed:", verifyError?.message);
+      // 401, as with a rejected Google token. No detail leaks to the client.
+      return res.status(401).json({ message: "Token verification failed. Please try again." });
+    }
+
+    const appleId = claims.sub; // Apple's stable, per-app user id
+    // QUIRK 2 — "Hide My Email" issues an @privaterelay.appleid.com address.
+    // It is a real, deliverable address and is accepted as-is. The claim is
+    // used, never req.body.email.
+    const verifiedEmail = typeof claims.email === "string" ? claims.email.trim().toLowerCase() : "";
+
+    // ── Find or create ──
+    // Look up by appleId FIRST (the only identifier present on every sign-in),
+    // then fall back to the verified email so an existing Google/password
+    // account is LINKED instead of duplicated.
+    let user = await User.findOne({ appleId });
+    let linkedExisting = false;
+    if (!user && verifiedEmail) {
+      user = await User.findOne({ email: verifiedEmail });
+      if (user) linkedExisting = true;
+    }
+
+    if (!user) {
+      // QUIRK 1 (first half) — this is the ONE request in which Apple gives us
+      // a name and a real email. Persist them now or they are gone forever.
+      if (!verifiedEmail) {
+        // Can't create an account without an email (schema-required, and the
+        // only way the user could ever recover it).
+        return res
+          .status(400)
+          .json({ message: "Apple did not provide an email for this account" });
+      }
+
+      const displayName =
+        (typeof fullName === "string" && fullName.trim()) ||
+        [claims.given_name, claims.family_name].filter(Boolean).join(" ").trim() ||
+        verifiedEmail.split("@")[0];
+
+      const randomPassword = Math.random().toString(36) + Date.now().toString(36);
+
+      user = new User({
+        name: displayName,
+        email: verifiedEmail,
+        password: await bcrypt.hash(randomPassword, 10),
+        isApproved: true,
+        role: "Player",
+        authProvider: "apple",
+        appleId,
+        // Apple's email_verified claim arrives as either boolean or "true".
+        emailVerified: claims.email_verified === true || claims.email_verified === "true",
+        mobile: "pending",
+        needsMobileUpdate: true,
+        // Apple returns no birthday, exactly as Google doesn't — the account is
+        // created locked and every age-gated route rejects it until the app's
+        // DOB screen posts one.
+        dobRequired: true,
+      });
+
+      try {
+        await user.save();
+      } catch (saveError) {
+        console.error(
+          "[APPLE] account creation failed:",
+          saveError?.message,
+          saveError?.errors ? Object.keys(saveError.errors) : ""
+        );
+        return res.status(500).json({
+          message: "Failed to create account",
+          requiresMobile: true,
+        });
+      }
+    } else {
+      // A deleted account's row survives as an anonymized tombstone (see
+      // services/accountDeletionService.js). It must never be re-animated by a
+      // sign-in — Apple reuses the same `sub` if the person authorizes again,
+      // so without this check deletion would be undoable.
+      if (user.isDeleted) {
+        return res.status(401).json({ message: "This account has been deleted." });
+      }
+
+      // QUIRK 1 (second half) — on EVERY sign-in after the first, Apple sends
+      // no name and no email. Only ever fill a BLANK stored field; never
+      // overwrite a stored value with an empty one.
+      let dirty = false;
+      if (user.appleId !== appleId) {
+        user.appleId = appleId;
+        dirty = true;
+      }
+      if (linkedExisting) {
+        // Account linking: keep the original authProvider so the existing
+        // Google/password path keeps working; appleId is additive.
+        if (!user.authProvider || user.authProvider === "local") {
+          user.authProvider = "apple";
+          dirty = true;
+        }
+      }
+      const incomingName = typeof fullName === "string" ? fullName.trim() : "";
+      if (!user.name && incomingName) {
+        user.name = incomingName;
+        dirty = true;
+      }
+      if (!user.email && verifiedEmail) {
+        user.email = verifiedEmail;
+        dirty = true;
+      }
+      if (
+        !user.emailVerified &&
+        (claims.email_verified === true || claims.email_verified === "true")
+      ) {
+        user.emailVerified = true;
+        dirty = true;
+      }
+      if (dirty) {
+        // Same legacy guard as /google-login: accounts created before DOB was
+        // mandatory would fail validation on save and surface as a misleading
+        // 401. Flag them to the DOB screen instead.
+        if (!user.dateOfBirth && User.AGE_GATED_ROLES.includes(user.role)) {
+          user.dobRequired = true;
+        }
+        await user.save();
+      }
+    }
+
+    // Optional: capture an Apple refresh token so deletion can revoke it.
+    // No-op unless APPLE_TEAM_ID / APPLE_KEY_ID / APPLE_PRIVATE_KEY are set.
+    if (authorizationCode) {
+      const tokens = await exchangeAppleAuthorizationCode(authorizationCode);
+      if (tokens && tokens.refresh_token) {
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { appleRefreshToken: tokens.refresh_token } }
+        );
+      }
+    }
+
+    // SA-controlled suspension/rejection — even via Apple auth.
+    if (user.status === "suspended") {
+      return res.status(403).json({
+        success: false,
+        code: "ACCOUNT_SUSPENDED",
+        message: "Your account has been suspended. Contact support.",
+        reason: user.suspensionReason || null,
+      });
+    }
+    if (user.status === "rejected") {
+      return res.status(403).json({
+        success: false,
+        code: "ACCOUNT_REJECTED",
+        message: "Your account has been rejected. Contact support.",
+        reason: user.suspensionReason || null,
+      });
+    }
+
+    const jwtToken = signAccessToken(user);
+    const refreshToken = await issueRefreshToken(user._id, {
+      userAgent: req.headers["user-agent"],
+    });
+
+    // ⚠️ SHAPE MUST MATCH /google-login EXACTLY — the mobile app reuses its
+    // googleLogin response handling. Do not add/rename/reorder fields here
+    // without changing both endpoints together.
+    res.json({
+      token: jwtToken,
+      refreshToken,
+      user: {
+        id: user._id,
+        _id: user._id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        isApproved: user.isApproved,
+        profilePicture: user.profilePicture,
+        mobile: user.mobile,
+        needsMobileUpdate: user.needsMobileUpdate || user.mobile === "pending",
+        requiresDob:
+          user.dobRequired === true ||
+          (!user.dateOfBirth && User.AGE_GATED_ROLES.includes(user.role)),
+      },
+    });
+  } catch (error) {
+    console.error("Apple login error:", error.message);
+    res.status(401).json({
+      message: "Authentication failed. Please try again.",
+    });
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Account deletion — DELETE /api/account  (alias: DELETE /api/auth/account)
+//
+// App Store Guideline 5.1.1(v): an app that supports account creation must let
+// the user initiate deletion IN THE APP. Deactivation does not satisfy it.
+//
+// Body: { confirm: "DELETE" }   <- required, so a stray or mis-routed call
+//                                  cannot destroy an account
+//
+// AUTHORIZATION: the target id comes from `req.user` — the id inside the JWT
+// that `authenticate` has already verified AND re-loaded from the database. It
+// is never read from the body, the query or a route param, so there is no
+// shape of request that deletes somebody else's account. (`authenticate` also
+// resolves Managers/Substitutes; those principals carry no User row and are
+// rejected with 404 by the service.)
+//
+// Semantics (hard delete vs. anonymization) and the per-collection retention
+// decisions are documented in services/accountDeletionService.js.
+// ════════════════════════════════════════════════════════════════════════════
+router.delete(["/account", "/auth/account"], authenticate, async (req, res) => {
+  try {
+    const { confirm } = req.body || {};
+    if (confirm !== "DELETE") {
+      return res.status(400).json({
+        success: false,
+        message: 'Account deletion requires { "confirm": "DELETE" } in the request body.',
+      });
+    }
+
+    const userId = req.user && (req.user.id || req.user._id);
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Not authenticated." });
+    }
+
+    const result = await deleteUserAccount(userId, {
+      // Lets a client that still holds a fresh Apple authorization code supply
+      // a revocable token when none was captured at login.
+      appleRefreshToken: (req.body || {}).appleRefreshToken || null,
+    });
+
+    if (result.notFound) {
+      return res.status(404).json({ success: false, message: "Account not found." });
+    }
+
+    return res.json({
+      success: true,
+      message: "Your account and personal data have been permanently deleted.",
+      appleTokenRevoked: result.appleRevocation ? result.appleRevocation.revoked : null,
+    });
+  } catch (error) {
+    console.error("Account deletion error:", error.message);
+    return res.status(500).json({ success: false, message: "Failed to delete account." });
   }
 });
 

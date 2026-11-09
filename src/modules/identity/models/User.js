@@ -120,6 +120,17 @@ const UserSchema = new mongoose.Schema({
   // Additional Information
   rank: { type: String },
   achievements: { type: String },
+  // Set once the free-text `achievements` above has been converted into
+  // PlayerHistory entries (see playerHistoryService.migrateLegacyAchievements).
+  // The text itself is kept as a backup and is no longer edited by the app.
+  achievementsMigratedAt: { type: Date, default: null },
+  // Who may read this player's history timeline. 'public' keeps the behaviour
+  // from before the setting existed (achievements were on the public profile).
+  historyVisibility: {
+    type: String,
+    enum: ['public', 'followers', 'private'],
+    default: 'public',
+  },
   bio: { type: String },
   referralCode: { type: String },
 
@@ -165,7 +176,18 @@ const UserSchema = new mongoose.Schema({
   following: [{ type: mongoose.Schema.Types.ObjectId, ref: "User" }],
   isApproved: { type: Boolean, default: false },
   googleId: { type: String }, // sparse index declared below (avoid dup)
-  authProvider: { type: String, enum: ["local", "google"], default: "local" },
+  // Sign in with Apple — the verified `sub` claim from the identity token.
+  // Declared exactly like googleId (plain String, sparse index below) because
+  // most accounts have no appleId and a non-sparse unique index would collide
+  // on every null.
+  appleId: { type: String }, // sparse index declared below (avoid dup)
+  // Apple refresh token, captured only when the client sends an
+  // `authorizationCode` at apple-login AND the Apple client-secret env config
+  // is present. Needed at account deletion: Apple requires the app to call
+  // POST https://appleid.apple.com/auth/revoke for Sign-in-with-Apple accounts
+  // (Guideline 5.1.1(v)). Never returned to clients.
+  appleRefreshToken: { type: String, default: null, select: false },
+  authProvider: { type: String, enum: ["local", "google", "apple"], default: "local" },
   emailVerified: { type: Boolean, default: false },
   isActive: { type: Boolean, default: true },
   profilePicture: { type: String }, // For Google profile pictures
@@ -194,6 +216,14 @@ const UserSchema = new mongoose.Schema({
     type: String,
     default: null,
   },
+
+  // ── Account deletion (App Store Guideline 5.1.1(v)) ──
+  // A user-initiated deletion ANONYMIZES this document in place rather than
+  // removing it (see services/accountDeletionService.js for the rationale).
+  // `isDeleted` is the tombstone marker: login and every auth middleware treat
+  // it as "no such account". It is never cleared — deletion is irreversible.
+  isDeleted: { type: Boolean, default: false, index: true },
+  deletedAt: { type: Date, default: null },
 
   // Metadata
   createdAt: { type: Date, default: Date.now },
@@ -254,6 +284,9 @@ UserSchema.methods.compareParentalPin = async function (candidatePin) {
 UserSchema.index({ email: 1, role: 1 });
 UserSchema.index({ playerId: 1 }, { unique: true, sparse: true });
 UserSchema.index({ googleId: 1 }, { sparse: true });
+// Sparse for the same reason as googleId: the overwhelming majority of users
+// have no appleId, and a non-sparse index would store an entry per null.
+UserSchema.index({ appleId: 1 }, { sparse: true });
 UserSchema.index({ role: 1 });
 UserSchema.index({ clubId: 1 }, { sparse: true });
 
@@ -262,6 +295,7 @@ UserSchema.index({ clubId: 1 }, { sparse: true });
 UserSchema.set("toJSON", {
   transform: (_doc, ret) => {
     delete ret.password;
+    delete ret.appleRefreshToken;
     if (ret.parentalControls) delete ret.parentalControls.pin;
     return ret;
   },
@@ -316,5 +350,8 @@ const User = mongoose.model("User", UserSchema);
 // Named export alongside the model (the model stays the default export so the
 // ~100 existing `require("...User")` call sites keep working unchanged).
 User.AGE_GATED_ROLES = AGE_GATED_ROLES;
+// Exposed so the account-deletion flow can purge the same owned records a hard
+// delete would, without duplicating the list (services/accountDeletionService.js).
+User.cascadeDeleteUser = cascadeDeleteUser;
 
 module.exports = User;

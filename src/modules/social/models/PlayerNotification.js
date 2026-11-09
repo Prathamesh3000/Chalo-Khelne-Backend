@@ -21,6 +21,7 @@ const playerNotificationSchema = new mongoose.Schema(
         "chat_message",        // New chat message (when app is background)
         "invitation_received", // Tournament invitation
         "invitation_accepted", // Someone accepted your invitation
+        "history_tag",         // Tagged in a post — pending playing-history entry to approve
         "general",             // General announcement
       ],
     },
@@ -43,6 +44,8 @@ const playerNotificationSchema = new mongoose.Schema(
       conversationId: String,
       senderName: String,
       invitationId: String,
+      historyId: String,
+      postId: String,
     },
     isRead: {
       type: Boolean,

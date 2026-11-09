@@ -555,6 +555,142 @@ describe("per-category play day on edit", () => {
   });
 });
 
+// ── Per-category time slots ──
+//
+// A category plays in one or more blocks on its day ("U14 group stage
+// 09:00-11:00, U14 finals 15:00-17:00"). The wizard always offers one default
+// slot plus an Add button, so the two mistakes the server has to absorb are a
+// reversed slot and a duplicate created by clicking Add twice.
+describe("per-category time slots", () => {
+  const slotBody = (categories) => ({
+    title: "Slotted Open",
+    startDate: "2026-10-31",
+    endDate: "2026-10-31",
+    selectedTime: { startTime: "08:00", endTime: "20:00" },
+    sports: [{ sportName: "Carrom", tournamentLevel: "unranked", categories }],
+  });
+
+  const create = (categories) =>
+    request(app)
+      .post("/api/tournaments/createTournament")
+      .set("Authorization", `Bearer ${token}`)
+      .send(slotBody(categories));
+
+  const savedCats = async () =>
+    (await Tournament.findOne({ title: "Slotted Open" }).lean()).sports[0].categories;
+
+  test("persists multiple slots per category, earliest first", async () => {
+    expect((await create([
+      {
+        name: "Under 14",
+        fee: 300,
+        timeSlots: [
+          { startTime: "15:00", endTime: "17:00" },
+          { startTime: "09:00", endTime: "11:00" },
+        ],
+      },
+      { name: "Open", fee: 500, timeSlots: [{ startTime: "11:30", endTime: "13:00" }] },
+    ])).status).toBeLessThan(400);
+
+    const cats = await savedCats();
+    expect(cats.map((c) => c.timeSlots.map((s) => `${s.startTime}-${s.endTime}`))).toEqual([
+      ["09:00-11:00", "15:00-17:00"], // sorted, not insertion order
+      ["11:30-13:00"],
+    ]);
+  });
+
+  test("a category with no slots stores an empty list, not null", async () => {
+    expect((await create([{ name: "Open", fee: 0 }])).status).toBeLessThan(400);
+    expect((await savedCats())[0].timeSlots).toEqual([]);
+  });
+
+  test("drops unusable slots instead of failing the save", async () => {
+    expect((await create([{
+      name: "Open",
+      fee: 0,
+      timeSlots: [
+        { startTime: "17:00", endTime: "15:00" }, // end before start
+        { startTime: "10:00", endTime: "10:00" }, // zero length
+        { startTime: "09:00" },                   // no end
+        { startTime: "half nine", endTime: "11:00" },
+        { startTime: "25:00", endTime: "26:00" }, // not a real clock time
+        { startTime: "9:30", endTime: "11:00" },  // valid, needs padding
+      ],
+    }])).status).toBeLessThan(400);
+
+    expect((await savedCats())[0].timeSlots).toEqual([
+      { startTime: "09:30", endTime: "11:00" },
+    ]);
+  });
+
+  test("de-duplicates identical slots (Add clicked twice)", async () => {
+    expect((await create([{
+      name: "Open",
+      fee: 0,
+      timeSlots: [
+        { startTime: "09:00", endTime: "11:00" },
+        { startTime: "09:00", endTime: "11:00" },
+        { startTime: "09:00", endTime: "12:00" }, // same start, different end — kept
+      ],
+    }])).status).toBeLessThan(400);
+
+    expect((await savedCats())[0].timeSlots).toEqual([
+      { startTime: "09:00", endTime: "11:00" },
+      { startTime: "09:00", endTime: "12:00" },
+    ]);
+  });
+
+  test("caps the list so a scripted payload can't grow a category unboundedly", async () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({
+      startTime: `${String(i).padStart(2, "0")}:00`,
+      endTime: `${String(i).padStart(2, "0")}:30`,
+    }));
+    expect((await create([{ name: "Open", fee: 0, timeSlots: many }])).status).toBeLessThan(400);
+    expect((await savedCats())[0].timeSlots).toHaveLength(12);
+  });
+
+  test("slots survive the edit round-trip and can be replaced", async () => {
+    await create([{ name: "Open", fee: 0, timeSlots: [{ startTime: "09:00", endTime: "11:00" }] }]);
+    const id = (await Tournament.findOne({ title: "Slotted Open" }).lean())._id;
+
+    // The edit wizard loads the tournament, then PUTs the whole sports[] back.
+    const loaded = (await request(app)
+      .get(`/api/tournaments/${id}`)
+      .set("Authorization", `Bearer ${token}`)).body.tournament;
+    expect(loaded.sports[0].categories[0].timeSlots).toEqual([
+      { startTime: "09:00", endTime: "11:00" },
+    ]);
+
+    const res = await request(app)
+      .put(`/api/tournaments/edit/${id}`)
+      .set("Authorization", `Bearer ${token}`)
+      .send({
+        title: loaded.title,
+        startDate: loaded.startDate,
+        endDate: loaded.endDate,
+        sports: JSON.stringify([{
+          sportName: "Carrom",
+          tournamentLevel: "unranked",
+          categories: [{
+            name: "Open",
+            fee: 0,
+            timeSlots: [
+              { startTime: "14:00", endTime: "16:00" },
+              { startTime: "18:00", endTime: "19:30" },
+            ],
+          }],
+        }]),
+      });
+    expect(res.status).toBeLessThan(400);
+
+    const saved = await Tournament.findById(id).lean();
+    expect(saved.sports[0].categories[0].timeSlots).toEqual([
+      { startTime: "14:00", endTime: "16:00" },
+      { startTime: "18:00", endTime: "19:30" },
+    ]);
+  });
+});
+
 // ── Registration deadline + daily timings ──
 //
 // The wizard sends the deadline as a UTC ISO instant and the daily timings as

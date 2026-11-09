@@ -40,6 +40,20 @@ const groupSchema = new mongoose.Schema({
 module.exports = groupSchema;
 
 
+// One block of play inside a day, as "HH:mm" — the same shape and 24-hour
+// string format as the tournament-wide `selectedTime` window further down, so
+// the two can be compared directly with `<` / `>`.
+//
+// `_id: false` because a slot is a value, not an entity: nothing references
+// one, and generated ids would otherwise churn on every save.
+const categoryTimeSlotSchema = new mongoose.Schema(
+  {
+    startTime: { type: String, default: null },
+    endTime: { type: String, default: null },
+  },
+  { _id: false }
+);
+
 // Per-sport track sub-schema. Each tournament can have one or more sports,
 // and each sport entry holds its own categories, format, rule book, and
 // stage progression. Legacy root scalars (sportsType, matchFormat, category,
@@ -83,6 +97,17 @@ const sportTrackSchema = new mongoose.Schema(
       // Day this category is played ("YYYY-MM-DD", same format as the
       // tournament's startDate/endDate). Null = runs across the whole event.
       date:   { type: String, default: null },
+
+      // When this category plays on its day. A LIST, not a single window: one
+      // category can run in several blocks (group stage 09:00-11:00, finals
+      // 15:00-17:00), which is why this is not shaped like `selectedTime`.
+      //
+      // Empty = no time pinned, so the category runs any time inside the
+      // tournament's daily window — the state every category saved before this
+      // field existed loads in. Normalized in tournamentController
+      // (`toTimeSlots`): sorted earliest-first and de-duplicated, so consumers
+      // can read timeSlots[0] as "when it starts" without sorting again.
+      timeSlots: { type: [categoryTimeSlotSchema], default: [] },
 
       // Per-category format overrides. A sport track carries one format for
       // all its categories, which cannot express "Men's Singles is singles,

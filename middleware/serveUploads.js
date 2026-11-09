@@ -31,6 +31,8 @@ const PUBLIC_DIRS = [
   "events",
   "equipment",
   "qrcodes",
+  "posts",
+  "history",
 ];
 
 const PRIVATE_DIRS = [

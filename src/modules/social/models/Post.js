@@ -4,6 +4,13 @@ const postSchema = new mongoose.Schema({
   tournamentName: { type: String, required: true },
   caption: { type: String, required: true },
   tags: [{ type: String }],
+  // Real accounts tagged in the post (`tags` stays free-text for back-compat).
+  // Each gets a PENDING player-history entry they must approve.
+  taggedUsers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+  // When the match/event took place (not when the post was written).
+  eventDate: { type: Date },
+  // Uploaded photos, as paths relative to the uploads dir (e.g. "posts/x.jpg").
+  images: [{ type: String }],
   location: { type: String },
   link: { type: String },
   linkPreview: {
