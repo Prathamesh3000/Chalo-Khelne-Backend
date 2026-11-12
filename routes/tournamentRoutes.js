@@ -121,6 +121,12 @@ router.post(
 );
 router.get("/", tournamentController.getAllTournaments);
 
+// Batch title/date lookup for the notifications inbox: one request instead of one
+// per tournament, and ids that no longer exist are simply absent (no 404 noise).
+// Authenticated so the tenant plugin scopes club staff to their own club.
+// MUST come before the catch-all `/:id`.
+router.get("/summaries", allowUserOrManager, tournamentController.getTournamentSummaries);
+
 // MUST come before the catch-all `/:id`. Legacy pages
 // (TournamentOverviewPage, PlayersPage, useGroups, useTournamentDashboard)
 // call `/api/tournaments/getRegisteredPlayers?tournamentId=...` but the

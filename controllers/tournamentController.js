@@ -1026,6 +1026,41 @@ exports.createTournament = async (req, res) => {
 };
 
 
+// GET /api/tournaments/summaries?ids=a,b,c
+// Returns { success, tournaments: [{ _id, title, startDate, endDate }] } for the
+// ids that exist (and, for club staff, belong to their club — the Tournament
+// tenant plugin scopes this find). Unknown, deleted or malformed ids are skipped
+// rather than failing the request, so a caller can treat "absent" as "deleted".
+const MAX_SUMMARY_IDS = 100;
+exports.getTournamentSummaries = async (req, res) => {
+  try {
+    const ids = [
+      ...new Set(
+        String(req.query.ids || "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean)
+      ),
+    ];
+    if (ids.length > MAX_SUMMARY_IDS) {
+      return res.status(400).json({
+        success: false,
+        message: `At most ${MAX_SUMMARY_IDS} ids per request.`,
+      });
+    }
+    const valid = ids.filter((id) => mongoose.Types.ObjectId.isValid(id));
+    if (valid.length === 0) return res.json({ success: true, tournaments: [] });
+
+    const tournaments = await Tournament.find({ _id: { $in: valid } })
+      .select("title startDate endDate")
+      .lean();
+    res.json({ success: true, tournaments });
+  } catch (error) {
+    console.error("Error fetching tournament summaries:", error);
+    res.status(500).json({ success: false, message: "Failed to fetch tournaments" });
+  }
+};
+
 exports.getTournamentById = async (req, res) => {
   try {
     const tournament = await Tournament.findById(req.params.id);
