@@ -50,6 +50,19 @@ async function setCurrentStage(tournamentId, sportId, stage) {
   );
 }
 
+// Set currentStage on EVERY sport track of a tournament (e.g. mark the whole
+// tournament completed). Writes the per-sport tracks via the all-positional
+// operator — never the root `currentStage`, which the schema no longer declares
+// (Mongoose strict mode drops such writes silently).
+async function setAllTracksStage(tournamentId, stage) {
+  const Tournament = require("../src/modules/tournaments/models/Tournament");
+  return Tournament.findOneAndUpdate(
+    { _id: tournamentId },
+    { $set: { "sports.$[].currentStage": stage } },
+    { new: true }
+  );
+}
+
 // Update a stageConfig dot-path on a specific sport-track. `path` is
 // relative to stageConfig (e.g., "qualifierKnockout.enabled").
 async function setStageConfigPath(tournamentId, sportId, path, value) {
@@ -205,6 +218,7 @@ module.exports = {
   listSportTracks,
   getCurrentStage,
   setCurrentStage,
+  setAllTracksStage,
   setStageConfigPath,
   getMatchFormat,
   getSportName,

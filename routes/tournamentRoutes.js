@@ -151,6 +151,14 @@ router.get("/getRegisteredPlayers", async (req, res) => {
 router.get("/manager/:managerId", tournamentController.getTournamentsByManager);
 // 🚀 New Corporate specific routes
 router.get("/corporate/:corporateId", tournamentController.getTournamentsByCorporate);
+// "Mark as completed": moves every sport track to the completed stage.
+router.patch(
+  "/:tournamentId/complete",
+  allowUserOrManager,
+  requirePermission("tournament:manage"),
+  requireTournamentOwner({ idParam: "tournamentId" }),
+  tournamentController.completeTournament
+);
 router.put(
   "/:tournamentId/whitelist",
   allowUserOrManager,

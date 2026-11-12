@@ -222,11 +222,11 @@ exports.generateNextRound = async (req, res) => {
     }
 
     if (winners.length === 1) {
-      // Tournament completed
-      await Tournament.findByIdAndUpdate(tournamentId, {
-        currentStage: "completed",
-        tournamentStatus: "completed"
-      });
+      // This sport's final is done. Complete its track. (This used to write
+      // currentStage/tournamentStatus at the document root, which the schema no
+      // longer declares — Mongoose dropped the write, so nothing ever completed.)
+      const { setCurrentStage } = require("../utils/sportTrackUtils");
+      await setCurrentStage(tournamentId, _priorSportId, "completed");
 
       return res.status(200).json({
         success: true,

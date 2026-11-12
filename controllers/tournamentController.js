@@ -1061,6 +1061,59 @@ exports.getTournamentSummaries = async (req, res) => {
   }
 };
 
+// PATCH /api/tournaments/:tournamentId/complete — "Mark as completed".
+// The manager closes out a tournament by hand: every sport track moves to the
+// `completed` stage. Nothing in the live flows reaches `completed` on its own
+// (knockout, swiss, team knockout and bulk result upload all just stop), so this
+// is how a finished tournament stops showing as "needs wrap-up".
+//   - guarded by owner check at the route (requireTournamentOwner)
+//   - 409 if the tournament hasn't started (can't complete the future)
+//   - idempotent: already completed -> 200 { alreadyCompleted: true }
+const todayLocalISO = () => {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+};
+exports.completeTournament = async (req, res) => {
+  try {
+    const { tournamentId } = req.params;
+    if (!mongoose.Types.ObjectId.isValid(tournamentId)) {
+      return res.status(400).json({ success: false, message: "Invalid tournament id" });
+    }
+    const t = await Tournament.findById(tournamentId).select("startDate sports").lean();
+    if (!t) return res.status(404).json({ success: false, message: "Tournament not found" });
+
+    const shape = (tour) => ({
+      _id: tour._id,
+      sports: (tour.sports || []).map((s) => ({
+        sportId: s.sportId,
+        sportName: s.sportName,
+        currentStage: s.currentStage,
+      })),
+    });
+
+    const tracks = t.sports || [];
+    if (tracks.length > 0 && tracks.every((s) => s.currentStage === "completed")) {
+      return res.json({ success: true, alreadyCompleted: true, tournament: shape(t) });
+    }
+
+    const start = t.startDate ? String(t.startDate).slice(0, 10) : null;
+    if (start && start > todayLocalISO()) {
+      return res.status(409).json({
+        success: false,
+        message: "This tournament hasn't started yet, so it can't be marked as completed.",
+      });
+    }
+
+    const { setAllTracksStage } = require("../utils/sportTrackUtils");
+    const updated = await setAllTracksStage(tournamentId, "completed");
+    res.json({ success: true, tournament: shape(updated.toObject ? updated.toObject() : updated) });
+  } catch (error) {
+    console.error("Error completing tournament:", error);
+    res.status(500).json({ success: false, message: "Failed to mark tournament as completed" });
+  }
+};
+
 exports.getTournamentById = async (req, res) => {
   try {
     const tournament = await Tournament.findById(req.params.id);
